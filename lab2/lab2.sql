@@ -218,5 +218,23 @@ BEGIN
     DELETE FROM students_logs WHERE time > time_p;
 END;
 
+-------------------------------------------
+-- 6
+-------------------------------------------
 
+CREATE OR REPLACE TRIGGER update_students_count
+AFTER INSERT OR UPDATE OF group_id OR DELETE ON students
+FOR EACH ROW
+BEGIN
+    IF INSERTING THEN
+        UPDATE groups SET c_val = c_val + 1 WHERE id = :NEW.group_id; 
+    END IF;
+    IF UPDATING('group_id') THEN
+         UPDATE groups SET c_val = c_val + 1 WHERE id = :NEW.group_id;
+         UPDATE groups SET c_val = c_val - 1 WHERE id = :OLD.group_id;
+    END IF;
+    IF DELETING THEN
+         UPDATE groups SET c_val = c_val - 1 WHERE id = :OLD.group_id;
+    END IF;
+END;
 
