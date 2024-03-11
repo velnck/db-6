@@ -151,9 +151,14 @@ ALTER TABLE students ADD CONSTRAINT fk_group
     FOREIGN KEY (group_id) REFERENCES groups (id);
 
 CREATE OR REPLACE TRIGGER cascade_delete
-AFTER DELETE ON groups FOR EACH ROW
+BEFORE DELETE ON groups FOR EACH ROW
+DECLARE
+    PRAGMA AUTONOMOUS_TRANSACTION;
 BEGIN
+    EXECUTE IMMEDIATE 'ALTER TRIGGER update_students_count DISABLE';
     DELETE FROM students WHERE group_id = :OLD.id;
+    EXECUTE IMMEDIATE 'ALTER TRIGGER update_students_count ENABLE';
+    COMMIT;
 END;
 
 -------------------------------------------
