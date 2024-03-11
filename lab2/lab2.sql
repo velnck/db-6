@@ -191,3 +191,32 @@ BEGIN
     END IF;
 END;
 
+-------------------------------------------
+-- 5
+-------------------------------------------
+
+CREATE OR REPLACE PROCEDURE restore_students_table
+(time_p TIMESTAMP WITH TIME ZONE) IS
+BEGIN
+    FOR log_rec IN (
+        SELECT * FROM students_logs WHERE time > time_p 
+        ORDER BY time DESC, id DESC
+    ) LOOP
+        IF (log_rec.action = 'INSERT') THEN
+            DELETE FROM students WHERE id = log_rec.old_id;
+        END IF;
+        IF (log_rec.action = 'UPDATE') THEN
+            UPDATE students SET id = log_rec.old_id, 
+            name = log_rec.old_name, group_id = log_rec.old_group_id
+            WHERE id = log_rec.new_id;
+        END IF;
+        IF (log_rec.action = 'DELETE') THEN
+            INSERT INTO students (id, name, group_id)
+            VALUES (log_rec.old_id, log_rec.old_name, log_rec.old_group_id);
+        END IF;
+    END LOOP;
+    DELETE FROM students_logs WHERE time > time_p;
+END;
+
+
+
