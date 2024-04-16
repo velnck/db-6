@@ -29,6 +29,7 @@ ALTER TABLE prod.departments
 CREATE TABLE prod.test_constr(
     id number NOT NULL PRIMARY KEY
 );
+ALTER TABLE prod.test_constr ADD department_id NUMBER;
 
 
 CREATE OR REPLACE PROCEDURE prod.greetings 
