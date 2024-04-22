@@ -26,7 +26,14 @@ BEGIN
         IF is_found = FALSE THEN          
             DBMS_OUTPUT.PUT_LINE(prod_table.table_name);
         END IF;
-   END LOOP;
+    END LOOP;
+   
+    FOR dev_table IN dev_tables LOOP
+        search_for_cyclic_references(dev_table.table_name, dev_schema_name);
+    END LOOP;
+    FOR prod_table IN prod_tables LOOP
+        search_for_cyclic_references(prod_table.table_name, prod_schema_name);
+    END LOOP;
 END;
 
 
@@ -93,29 +100,64 @@ BEGIN
 END;
 
 
+CREATE OR REPLACE PROCEDURE search_for_cyclic_references(
+    table_name_to_check VARCHAR2, 
+    schema_name VARCHAR2
+)
+AS
+BEGIN
+    FOR cycle_row IN 
+    (
+        SELECT references_path FROM
+        (WITH r_constraints_table (constraint_name, referencer_table, referenced_table) 
+        AS (
+            SELECT r_constraints.constraint_name, 
+                   r_constraints.table_name referencer_table, 
+                   p_constraints.table_name referenced_table
+            FROM ALL_CONSTRAINTS r_constraints JOIN ALL_CONSTRAINTS p_constraints 
+            ON r_constraints.r_constraint_name = p_constraints.constraint_name 
+            WHERE r_constraints.constraint_type = 'R' 
+            AND r_constraints.owner = schema_name
+        ), 
+        recursive_table (
+            referenced_table, 
+            referencer_table, 
+            steps_count, 
+            references_path
+        ) AS ( 
+            SELECT referenced_table, referencer_table, 1, referencer_table
+            FROM r_constraints_table
+            WHERE referencer_table = table_name_to_check
+            UNION ALL
+            SELECT r_constraints_table.referenced_table, 
+                   r_constraints_table.referencer_table, 
+                   steps_count + 1, 
+                   recursive_table.references_path || ' -> ' || r_constraints_table.referencer_table
+            FROM r_constraints_table
+            JOIN recursive_table 
+            ON r_constraints_table.referencer_table = recursive_table.referenced_table
+        ) CYCLE referenced_table SET is_cycle TO '1' DEFAULT '0'
+        SELECT referenced_table, referencer_table, is_cycle, steps_count, references_path
+        FROM recursive_table WHERE is_cycle = 1)
+    )
+    LOOP
+        IF REGEXP_LIKE(cycle_row.references_path, 
+            REGEXP_SUBSTR(cycle_row.references_path, '[^ ]+', 1, 1) || '$') = true
+        THEN
+            DBMS_OUTPUT.PUT_LINE('Detected cycle: ' || cycle_row.references_path 
+                || ' (schema: ''' || schema_name || ''').');
+        END IF;
+    END LOOP;
+END;
+
+
+
+
 -- TEST--
 SET SERVEROUTPUT ON;
 EXEC GET_DIFFERENCES('DEV', 'PROD');
 EXEC GET_DIFFERENCES('PROD', 'DEV');
 
 
-SELECT * FROM ALL_CONSTRAINTS WHERE OWNER IN ('DEV', 'PROD');
-
-
-SELECT COUNT(*) FROM ((SELECT CONSTRAINT_NAME FROM ALL_CONSTRAINTS
-        WHERE owner = 'DEV' AND table_name = 'TEST_CONSTR' 
-        AND constraint_name NOT LIKE 'SYS%' 
-        MINUS 
-        SELECT CONSTRAINT_NAME FROM ALL_CONSTRAINTS
-        WHERE owner = 'PROD' AND table_name = 'TEST_CONSTR' 
-        AND constraint_name NOT LIKE 'SYS%') 
-        UNION
-        (SELECT CONSTRAINT_NAME FROM ALL_CONSTRAINTS
-        WHERE owner = 'PROD' AND table_name = 'TEST_CONSTR' 
-        AND constraint_name NOT LIKE 'SYS%' 
-        MINUS 
-        SELECT CONSTRAINT_NAME FROM ALL_CONSTRAINTS
-        WHERE owner = 'DEV' AND table_name = 'TEST_CONSTR' 
-        AND constraint_name NOT LIKE 'SYS%'));
-
-
+     
+     

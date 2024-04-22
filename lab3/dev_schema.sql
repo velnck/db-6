@@ -101,3 +101,19 @@ ALTER TABLE dev.n1
   ADD CONSTRAINT x1_ref_n1
     FOREIGN KEY (y)
     REFERENCES dev.n2(x1);
+
+CREATE TABLE dev.n3(
+    x1 number primary key,
+    n1_ref number,
+    CONSTRAINT fk_n1
+    FOREIGN KEY (n1_ref)
+    REFERENCES dev.n1(x)
+);
+
+ALTER TABLE dev.n1
+  ADD n3_ref NUMBER;
+    
+ALTER TABLE dev.n1
+  ADD CONSTRAINT fk_n3 
+  FOREIGN KEY (n3_ref)
+  REFERENCES dev.n3(x1);
