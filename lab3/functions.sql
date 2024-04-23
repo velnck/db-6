@@ -4,6 +4,8 @@ AS
 BEGIN
     compare_tables(dev_schema_name, prod_schema_name);
     compare_functions(dev_schema_name, prod_schema_name);
+    compare_indexes(dev_schema_name, prod_schema_name);
+    compare_packages(dev_schema_name, prod_schema_name);
 END;
 
 
@@ -176,7 +178,7 @@ BEGIN
         FOR dev_function IN dev_functions LOOP
             IF prod_function.OBJECT_NAME = dev_function.OBJECT_NAME THEN
                 is_found := TRUE;
-                IF have_different_arguments(dev_function.OBJECT_NAME, dev_schema_name, prod_schema_name) THEN
+                IF have_different_arguments(dev_function.OBJECT_NAME, dev_schema_name, prod_schema_name, NULL) THEN
                     DBMS_OUTPUT.PUT_LINE('Function ' || dev_function.OBJECT_NAME 
                         || ' has different arguments.');
                 END IF;
@@ -192,7 +194,8 @@ END;
 
 CREATE OR REPLACE FUNCTION have_different_arguments(function_name VARCHAR2, 
                                                     dev_schema_name VARCHAR2, 
-                                                    prod_schema_name VARCHAR2)
+                                                    prod_schema_name VARCHAR2,
+                                                    package_name_arg VARCHAR2)
 RETURN BOOLEAN
 AS
     TYPE argument_record_t IS RECORD 
@@ -206,14 +209,29 @@ AS
     dev_arguments arguments_table_t;
     prod_arguments arguments_table_t;
 BEGIN
-    SELECT argument_name, position, data_type, in_out 
-        BULK COLLECT INTO dev_arguments FROM ALL_ARGUMENTS 
-        WHERE OWNER = dev_schema_name AND OBJECT_NAME = function_name
-        ORDER BY position;
-    SELECT argument_name, position, data_type, in_out 
-        BULK COLLECT INTO prod_arguments FROM ALL_ARGUMENTS 
-        WHERE OWNER = prod_schema_name AND OBJECT_NAME = function_name
-        ORDER BY position;
+    IF package_name_arg IS NULL THEN
+        SELECT argument_name, position, data_type, in_out 
+            BULK COLLECT INTO dev_arguments FROM ALL_ARGUMENTS 
+            WHERE OWNER = dev_schema_name AND OBJECT_NAME = function_name
+            AND package_name IS NULL
+            ORDER BY position;
+        SELECT argument_name, position, data_type, in_out 
+            BULK COLLECT INTO prod_arguments FROM ALL_ARGUMENTS 
+            WHERE OWNER = prod_schema_name AND OBJECT_NAME = function_name
+            AND package_name IS NULL
+            ORDER BY position;
+    ELSE
+         SELECT argument_name, position, data_type, in_out 
+            BULK COLLECT INTO dev_arguments FROM ALL_ARGUMENTS 
+            WHERE OWNER = dev_schema_name AND OBJECT_NAME = function_name
+            AND package_name = package_name_arg
+            ORDER BY position;
+        SELECT argument_name, position, data_type, in_out 
+            BULK COLLECT INTO prod_arguments FROM ALL_ARGUMENTS 
+            WHERE OWNER = prod_schema_name AND OBJECT_NAME = function_name
+            AND package_name = package_name_arg
+            ORDER BY position;
+    END IF;
     IF dev_arguments.COUNT != prod_arguments.COUNT THEN
         RETURN TRUE;
     END IF;
@@ -230,17 +248,97 @@ BEGIN
 END;
 
 
+CREATE OR REPLACE PROCEDURE compare_indexes(dev_schema_name VARCHAR2, 
+                                            prod_schema_name VARCHAR2)
+AS
+    CURSOR dev_indexes IS SELECT index_name FROM ALL_INDEXES 
+        WHERE OWNER = dev_schema_name AND index_name NOT LIKE 'SYS%';
+    CURSOR prod_indexes IS SELECT index_name FROM ALL_INDEXES 
+        WHERE OWNER = prod_schema_name AND index_name NOT LIKE 'SYS%';
+    is_found BOOLEAN;
+BEGIN
+    FOR dev_index IN dev_indexes LOOP
+        is_found := FALSE;
+        FOR prod_index IN prod_indexes LOOP
+            IF dev_index.index_name = prod_index.index_name THEN
+                is_found := TRUE;
+                EXIT;
+            END IF;
+        END LOOP;
+        IF is_found = FALSE THEN
+            DBMS_OUTPUT.PUT_LINE('Index ' || dev_index.index_name);
+        END IF;
+    END LOOP;
+END;
+
+
+CREATE OR REPLACE PROCEDURE compare_packages(dev_schema_name VARCHAR2, 
+                                            prod_schema_name VARCHAR2)
+AS
+    CURSOR dev_packages IS SELECT object_name 
+        FROM ALL_OBJECTS WHERE OBJECT_TYPE = 'PACKAGE'
+        AND OWNER = dev_schema_name;
+    CURSOR prod_packages IS SELECT object_name 
+        FROM ALL_OBJECTS WHERE OBJECT_TYPE = 'PACKAGE'
+        AND OWNER = prod_schema_name;
+    package_is_found BOOLEAN;
+    procedure_is_found BOOLEAN;    
+BEGIN
+    FOR dev_package IN dev_packages LOOP
+        package_is_found := FALSE;
+        FOR prod_package IN prod_packages LOOP
+            IF dev_package.object_name = prod_package.object_name THEN
+                package_is_found := TRUE;
+                -- compare procedures
+                procedure_is_found := FALSE;
+                FOR dev_proc IN 
+                (
+                    SELECT procedure_name FROM ALL_PROCEDURES  WHERE OWNER = dev_schema_name 
+                    AND object_name = dev_package.object_name 
+                    AND procedure_name IS NOT NULL
+                ) LOOP
+                    FOR prod_proc IN 
+                    (
+                        SELECT procedure_name FROM ALL_PROCEDURES  WHERE OWNER = prod_schema_name 
+                        AND object_name = prod_package.object_name 
+                        AND procedure_name IS NOT NULL
+                    ) LOOP
+                        IF dev_proc.procedure_name = prod_proc.procedure_name THEN
+                            procedure_is_found := TRUE;
+                            -- compare procedures' arguments
+                            IF have_different_arguments(dev_proc.procedure_name, 
+                                                        dev_schema_name, 
+                                                        prod_schema_name,
+                                                        dev_package.object_name)
+                            THEN
+                                DBMS_OUTPUT.PUT_LINE('Different arguments in package '
+                                    || dev_package.object_name || ' in function '
+                                    || dev_proc.procedure_name);
+                            END IF;
+                            EXIT;
+                        END IF;
+                    END LOOP;
+                    IF procedure_is_found = FALSE THEN
+                        DBMS_OUTPUT.PUT_LINE('in package '
+                                    || dev_package.object_name || ' function '
+                                    || dev_proc.procedure_name);
+                    END IF;
+                END LOOP;                
+                EXIT;
+            END IF;
+        END LOOP;
+        IF package_is_found = FALSE THEN
+            DBMS_OUTPUT.PUT_LINE('Package ' || dev_package.object_name);
+        END IF;
+    END LOOP;
+END;
+
+
 
 
 --------------
 -- in progress
 --------------
-
-select * from all_objects
-where object_type IN ('PROCEDURE', 'FUNCTION')
-and owner = 'DEV';
-
-
 
 
 -- TEST--
