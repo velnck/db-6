@@ -1,6 +1,15 @@
 CREATE OR REPLACE PROCEDURE get_differences(dev_schema_name VARCHAR2, 
                                             prod_schema_name VARCHAR2)
 AS
+BEGIN
+    compare_tables(dev_schema_name, prod_schema_name);
+    compare_functions(dev_schema_name, prod_schema_name);
+END;
+
+
+CREATE OR REPLACE PROCEDURE compare_tables(dev_schema_name VARCHAR2, 
+                                           prod_schema_name VARCHAR2)
+AS
     CURSOR dev_tables IS SELECT TABLE_NAME FROM ALL_TABLES 
         WHERE OWNER = dev_schema_name;
     CURSOR prod_tables IS SELECT OBJECT_NAME AS TABLE_NAME 
@@ -149,6 +158,87 @@ BEGIN
         END IF;
     END LOOP;
 END;
+
+
+CREATE OR REPLACE PROCEDURE compare_functions(dev_schema_name VARCHAR2, 
+                                              prod_schema_name VARCHAR2)
+AS
+    CURSOR dev_functions IS SELECT OBJECT_NAME
+        FROM ALL_OBJECTS WHERE OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION')
+        AND OWNER = dev_schema_name;
+    CURSOR prod_functions IS SELECT OBJECT_NAME 
+        FROM ALL_OBJECTS WHERE OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION') 
+        AND OWNER = prod_schema_name ORDER BY CREATED ASC;
+    is_found BOOLEAN := FALSE;
+BEGIN
+    FOR prod_function IN prod_functions LOOP
+        is_found := FALSE;
+        FOR dev_function IN dev_functions LOOP
+            IF prod_function.OBJECT_NAME = dev_function.OBJECT_NAME THEN
+                is_found := TRUE;
+                IF have_different_arguments(dev_function.OBJECT_NAME, dev_schema_name, prod_schema_name) THEN
+                    DBMS_OUTPUT.PUT_LINE('Function ' || dev_function.OBJECT_NAME 
+                        || ' has different arguments.');
+                END IF;
+                EXIT;
+            END IF;
+        END LOOP; 
+        IF is_found = FALSE THEN          
+            DBMS_OUTPUT.PUT_LINE('Funciton ' || prod_function.object_name);
+        END IF;
+    END LOOP;
+END;
+
+
+CREATE OR REPLACE FUNCTION have_different_arguments(function_name VARCHAR2, 
+                                                    dev_schema_name VARCHAR2, 
+                                                    prod_schema_name VARCHAR2)
+RETURN BOOLEAN
+AS
+    TYPE argument_record_t IS RECORD 
+    (
+        argument_name ALL_ARGUMENTS.argument_name%TYPE,
+        position ALL_ARGUMENTS.position%TYPE, 
+        data_type ALL_ARGUMENTS.data_type%TYPE, 
+        in_out ALL_ARGUMENTS.in_out%TYPE
+    );
+    TYPE arguments_table_t IS TABLE OF argument_record_t;
+    dev_arguments arguments_table_t;
+    prod_arguments arguments_table_t;
+BEGIN
+    SELECT argument_name, position, data_type, in_out 
+        BULK COLLECT INTO dev_arguments FROM ALL_ARGUMENTS 
+        WHERE OWNER = dev_schema_name AND OBJECT_NAME = function_name
+        ORDER BY position;
+    SELECT argument_name, position, data_type, in_out 
+        BULK COLLECT INTO prod_arguments FROM ALL_ARGUMENTS 
+        WHERE OWNER = prod_schema_name AND OBJECT_NAME = function_name
+        ORDER BY position;
+    IF dev_arguments.COUNT != prod_arguments.COUNT THEN
+        RETURN TRUE;
+    END IF;
+    FOR i IN 1..dev_arguments.COUNT LOOP
+        IF dev_arguments(i).argument_name != prod_arguments(i).argument_name 
+            OR dev_arguments(i).position != prod_arguments(i).position
+            OR dev_arguments(i).data_type != prod_arguments(i).data_type
+            OR dev_arguments(i).in_out != prod_arguments(i).in_out 
+        THEN
+            RETURN TRUE;
+        END IF;
+    END LOOP;
+    RETURN FALSE;
+END;
+
+
+
+
+--------------
+-- in progress
+--------------
+
+select * from all_objects
+where object_type IN ('PROCEDURE', 'FUNCTION')
+and owner = 'DEV';
 
 
 

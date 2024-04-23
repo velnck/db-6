@@ -37,6 +37,12 @@ BEGIN
    dbms_output.put_line('Hello World!'); 
 END; 
 
+CREATE OR REPLACE PROCEDURE dev.greetings_with_argument(name_arg VARCHAR)
+AS 
+BEGIN 
+   dbms_output.put_line('Hello, ' || name_arg || '!'); 
+END;
+
 CREATE OR REPLACE PACKAGE dev.emp_mgmt AS
     FUNCTION hire(last_name VARCHAR2, job_id VARCHAR2, manager_id NUMBER, 
     salary NUMBER, commission_pct NUMBER, department_id NUMBER) RETURN NUMBER;
@@ -117,3 +123,10 @@ ALTER TABLE dev.n1
   ADD CONSTRAINT fk_n3 
   FOREIGN KEY (n3_ref)
   REFERENCES dev.n3(x1);
+  
+CREATE OR REPLACE FUNCTION dev.func_differrent_arguments(arg1 NUMBER, arg2 VARCHAR2)
+RETURN NUMBER
+AS
+BEGIN
+    RETURN arg1;
+END;

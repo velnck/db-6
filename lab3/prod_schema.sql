@@ -79,3 +79,10 @@ create table n2(
 CREATE TABLE prod.HI(
     str VARCHAR2(15)
 );
+
+CREATE OR REPLACE FUNCTION prod.func_differrent_arguments(arg1 NUMBER, arg2 NUMBER)
+RETURN NUMBER
+AS
+BEGIN
+    RETURN arg2;
+END;
