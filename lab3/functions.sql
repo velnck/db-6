@@ -165,10 +165,10 @@ END;
 CREATE OR REPLACE PROCEDURE compare_functions(dev_schema_name VARCHAR2, 
                                               prod_schema_name VARCHAR2)
 AS
-    CURSOR dev_functions IS SELECT OBJECT_NAME
+    CURSOR dev_functions IS SELECT OBJECT_NAME, OBJECT_TYPE
         FROM ALL_OBJECTS WHERE OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION')
         AND OWNER = dev_schema_name;
-    CURSOR prod_functions IS SELECT OBJECT_NAME 
+    CURSOR prod_functions IS SELECT OBJECT_NAME, OBJECT_TYPE 
         FROM ALL_OBJECTS WHERE OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION') 
         AND OWNER = prod_schema_name ORDER BY CREATED ASC;
     is_found BOOLEAN := FALSE;
@@ -181,6 +181,9 @@ BEGIN
                 IF have_different_arguments(dev_function.OBJECT_NAME, dev_schema_name, prod_schema_name, NULL) THEN
                     DBMS_OUTPUT.PUT_LINE('Function ' || dev_function.OBJECT_NAME 
                         || ' has different arguments.');
+                ELSIF have_different_text(dev_function.OBJECT_NAME, dev_schema_name, prod_schema_name, dev_function.object_type) THEN
+                    DBMS_OUTPUT.PUT_LINE('Function ' || dev_function.OBJECT_NAME 
+                        || ' has different text.');
                 END IF;
                 EXIT;
             END IF;
@@ -323,7 +326,14 @@ BEGIN
                                     || dev_package.object_name || ' function '
                                     || dev_proc.procedure_name);
                     END IF;
-                END LOOP;                
+                END LOOP;
+                IF have_different_text(dev_package.object_name, dev_schema_name, prod_schema_name, 'PACKAGE')
+                    OR have_different_text(dev_package.object_name, dev_schema_name, prod_schema_name, 'PACKAGE BODY')
+                THEN 
+                    DBMS_OUTPUT.PUT_LINE('Package '
+                                        || dev_package.object_name || 
+                                        ' has different text');
+                END IF;
                 EXIT;
             END IF;
         END LOOP;
@@ -336,9 +346,87 @@ END;
 
 
 
---------------
--- in progress
---------------
+
+
+
+CREATE OR REPLACE FUNCTION have_different_text(object_name VARCHAR2, 
+                                               dev_schema_name VARCHAR2, 
+                                               prod_schema_name VARCHAR2,
+                                               object_type VARCHAR2)
+RETURN BOOLEAN
+AS
+    TYPE string_list_t IS TABLE OF VARCHAR2(300);
+    dev_object_text string_list_t;
+    prod_object_text string_list_t;
+BEGIN
+    SELECT text BULK COLLECT INTO dev_object_text 
+        FROM ALL_SOURCE WHERE type = object_type
+        AND name = object_name
+        AND owner = dev_schema_name ORDER BY line;
+    SELECT text BULK COLLECT INTO prod_object_text 
+        FROM ALL_SOURCE WHERE type = object_type
+        AND name = object_name
+        AND owner = prod_schema_name ORDER BY line;
+    IF dev_object_text.COUNT != prod_object_text.COUNT THEN
+        RETURN TRUE;
+    END IF;
+    FOR i IN 1..dev_object_text.COUNT LOOP
+        IF dev_object_text(i) != prod_object_text(i) THEN
+            RETURN TRUE;
+        END IF;
+    END LOOP;
+    RETURN FALSE;
+END;
+
+
+select * from all_source where NAME = 'EMP_MGMT' AND OWNER = 'DEV'
+    order by TYPE, line;
+    
+
+
+
+
+CREATE OR REPLACE TYPE OBJECT_REC_TYPE AS OBJECT (
+    object_type VARCHAR2(20),
+    object_name VARCHAR(100),
+    CONSTRUCTOR FUNCTION OBJECT_REC_TYPE RETURN SELF AS RESULT
+);
+
+
+CREATE OR REPLACE TYPE BODY OBJECT_REC_TYPE 
+AS 
+    CONSTRUCTOR FUNCTION OBJECT_REC_TYPE RETURN SELF AS RESULT
+    IS
+    BEGIN
+        self.object_type := null;
+        self.object_name := null;
+        RETURN;
+    END;
+END;
+
+ 
+CREATE OR REPLACE TYPE OBJECT_TABLE_TYPE AS TABLE OF OBJECT_REC_TYPE; 
+
+SELECT * FROM ALL_INDEXES WHERE OWNER = 'DEV';
+
+
+SELECT * FROM ALL_IND_COLUMNS WHERE INDEX_OWNER = 'DEV';
+
+
+CREATE OR REPLACE FUNCTION update_prod_schema(dev_schema_name VARCHAR2, 
+                                              prod_schema_name VARCHAR2)
+RETURN VARCHAR2
+AS
+BEGIN
+    get_differences(dev_schema_name, prod_schema_name); 
+    get_differences(prod_schema_name, dev_schema_name); 
+    RETURN 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+END;
+
+
+
+
+
 
 
 -- TEST--

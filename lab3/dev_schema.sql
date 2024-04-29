@@ -130,3 +130,14 @@ AS
 BEGIN
     RETURN arg1;
 END;
+
+CREATE OR REPLACE PACKAGE dev.different_source_text AS
+    FUNCTION f1 RETURN NUMBER;
+    END different_source_text;
+
+CREATE OR REPLACE PACKAGE BODY dev.different_source_text AS 
+    FUNCTION f1 RETURN NUMBER IS
+    BEGIN
+        return 13;
+    END;
+END different_source_text;

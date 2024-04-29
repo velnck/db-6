@@ -86,3 +86,14 @@ AS
 BEGIN
     RETURN arg2;
 END;
+
+CREATE OR REPLACE PACKAGE prod.different_source_text AS
+    FUNCTION f1 RETURN NUMBER;
+    END different_source_text;
+
+CREATE OR REPLACE PACKAGE BODY prod.different_source_text AS 
+    FUNCTION f1 RETURN NUMBER IS
+    BEGIN
+        return 10;
+    END;
+END different_source_text;
