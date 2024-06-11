@@ -1,50 +1,61 @@
-CREATE OR REPLACE PROCEDURE get_differences(dev_schema_name VARCHAR2, 
-                                            prod_schema_name VARCHAR2)
-AS
-BEGIN
-    compare_tables(dev_schema_name, prod_schema_name);
-    compare_functions(dev_schema_name, prod_schema_name);
-    compare_indexes(dev_schema_name, prod_schema_name);
-    compare_packages(dev_schema_name, prod_schema_name);
-END;
+CREATE TABLE different_objects (
+    name VARCHAR2(100) NOT NULL,
+    type VARCHAR2(20) NOT NULL,
+    description VARCHAR2(100)
+);
 
 
 CREATE OR REPLACE PROCEDURE compare_tables(dev_schema_name VARCHAR2, 
-                                           prod_schema_name VARCHAR2)
+                                           prod_schema_name VARCHAR2,
+                                           search_for_cycles BOOLEAN DEFAULT TRUE)
+AUTHID CURRENT_USER
 AS
-    CURSOR dev_tables IS SELECT TABLE_NAME FROM ALL_TABLES 
-        WHERE OWNER = dev_schema_name;
-    CURSOR prod_tables IS SELECT OBJECT_NAME AS TABLE_NAME 
-        FROM ALL_OBJECTS WHERE OBJECT_TYPE = 'TABLE' 
-        AND OWNER = prod_schema_name ORDER BY CREATED ASC;
+    TYPE tables_t IS TABLE OF VARCHAR2(100);
+    dev_tables tables_t;
+    prod_tables tables_t;
+    
     is_found BOOLEAN := FALSE;
 BEGIN
-    FOR prod_table IN prod_tables LOOP
+    SELECT dev_t.OBJECT_NAME BULK COLLECT INTO dev_tables FROM 
+    (
+        (SELECT TABLE_NAME OBJECT_NAME FROM ALL_TABLES WHERE OWNER = dev_schema_name) dev_t
+        LEFT JOIN 
+        (SELECT OBJECT_NAME, CREATED CREATED_IN_PROD FROM ALL_OBJECTS 
+        WHERE OBJECT_TYPE = 'TABLE' AND OWNER = prod_schema_name) prod_t
+        ON dev_t.OBJECT_NAME = prod_t.OBJECT_NAME
+    ) ORDER BY CREATED_IN_PROD ASC;
+    SELECT OBJECT_NAME BULK COLLECT INTO prod_tables
+        FROM ALL_OBJECTS WHERE OBJECT_TYPE = 'TABLE' 
+        AND OWNER = prod_schema_name;
+    FOR i IN 1..dev_tables.COUNT LOOP
         is_found := FALSE;
-        FOR dev_table IN dev_tables LOOP
-            IF prod_table.TABLE_NAME = dev_table.TABLE_NAME THEN
+        FOR i_prod IN 1..prod_tables.COUNT LOOP
+            IF prod_tables(i_prod) = dev_tables(i) THEN
                 is_found := TRUE;
-                IF have_different_structure(dev_table.TABLE_NAME, dev_schema_name, prod_schema_name) THEN
-                    DBMS_OUTPUT.PUT_LINE('Table ' || dev_table.table_name 
-                        || ' has different structure.');
-                ELSIF have_different_constraints(dev_table.TABLE_NAME, dev_schema_name, prod_schema_name) THEN
-                    DBMS_OUTPUT.PUT_LINE('Table ' || dev_table.table_name 
-                        || ' has different constraints.');
+                IF have_different_structure(dev_tables(i), dev_schema_name, prod_schema_name) THEN
+                    INSERT INTO DIFFERENT_OBJECTS (name, type, description)
+                        VALUES (dev_tables(i), 'TABLE', 'STRUCTURE');
+                ELSIF have_different_constraints(dev_tables(i), dev_schema_name, prod_schema_name) THEN
+                    INSERT INTO DIFFERENT_OBJECTS (name, type, description)
+                        VALUES (dev_tables(i), 'TABLE', 'CONSTRAINTS');
                 END IF;
                 EXIT;
             END IF;
         END LOOP; 
         IF is_found = FALSE THEN          
-            DBMS_OUTPUT.PUT_LINE(prod_table.table_name);
+            INSERT INTO DIFFERENT_OBJECTS (name, type, description)
+                VALUES (dev_tables(i), 'TABLE', 'NOT EXISTS');
         END IF;
     END LOOP;
-   
-    FOR dev_table IN dev_tables LOOP
-        search_for_cyclic_references(dev_table.table_name, dev_schema_name);
-    END LOOP;
-    FOR prod_table IN prod_tables LOOP
-        search_for_cyclic_references(prod_table.table_name, prod_schema_name);
-    END LOOP;
+    
+    IF search_for_cycles THEN
+        FOR i IN 1..dev_tables.COUNT LOOP
+            search_for_cyclic_references(dev_tables(i), dev_schema_name);
+        END LOOP;
+        FOR i IN 1..prod_tables.COUNT LOOP
+            search_for_cyclic_references(prod_tables(i), prod_schema_name);
+        END LOOP;
+    END IF;
 END;
 
 
@@ -153,43 +164,65 @@ BEGIN
     )
     LOOP
         IF REGEXP_LIKE(cycle_row.references_path, 
-            REGEXP_SUBSTR(cycle_row.references_path, '[^ ]+', 1, 1) || '$') = true
+            REGEXP_SUBSTR(cycle_row.references_path, '[^ ]+', 1, 1) || '$') = true -- the first table in cycle is equal to the last
         THEN
             DBMS_OUTPUT.PUT_LINE('Detected cycle: ' || cycle_row.references_path 
-                || ' (schema: ''' || schema_name || ''').');
-        END IF;
+                    || ' (schema: ''' || schema_name || ''').');
+            END IF;
     END LOOP;
 END;
 
 
 CREATE OR REPLACE PROCEDURE compare_functions(dev_schema_name VARCHAR2, 
                                               prod_schema_name VARCHAR2)
+AUTHID CURRENT_USER
 AS
-    CURSOR dev_functions IS SELECT OBJECT_NAME, OBJECT_TYPE
-        FROM ALL_OBJECTS WHERE OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION')
-        AND OWNER = dev_schema_name;
-    CURSOR prod_functions IS SELECT OBJECT_NAME, OBJECT_TYPE 
-        FROM ALL_OBJECTS WHERE OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION') 
-        AND OWNER = prod_schema_name ORDER BY CREATED ASC;
+    TYPE func_record_t IS RECORD 
+    (
+        OBJECT_NAME ALL_OBJECTS.OBJECT_NAME%TYPE,
+        OBJECT_TYPE ALL_OBJECTS.OBJECT_TYPE%TYPE
+    );
+    TYPE funcs_table_t IS TABLE OF func_record_t;
+    dev_funcs funcs_table_t;
+    prod_funcs funcs_table_t;
     is_found BOOLEAN := FALSE;
 BEGIN
-    FOR prod_function IN prod_functions LOOP
+    SELECT DEV_T.OBJECT_NAME, OBJECT_TYPE BULK COLLECT INTO dev_funcs FROM 
+        (
+            (
+                SELECT OBJECT_NAME, OBJECT_TYPE
+                FROM ALL_OBJECTS WHERE OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION')
+                AND OWNER = dev_schema_name
+            ) dev_t
+            LEFT JOIN 
+            (
+                SELECT OBJECT_NAME, CREATED CREATED_IN_PROD
+                FROM ALL_OBJECTS WHERE OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION')
+                AND OWNER = prod_schema_name
+            ) prod_t
+            ON dev_t.OBJECT_NAME = prod_t.OBJECT_NAME
+        ) ORDER BY CREATED_IN_PROD ASC;
+    SELECT OBJECT_NAME, OBJECT_TYPE BULK COLLECT INTO prod_funcs 
+        FROM ALL_OBJECTS WHERE OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION') 
+        AND OWNER = prod_schema_name ORDER BY CREATED ASC;
+    FOR i_dev IN 1..dev_funcs.COUNT LOOP
         is_found := FALSE;
-        FOR dev_function IN dev_functions LOOP
-            IF prod_function.OBJECT_NAME = dev_function.OBJECT_NAME THEN
+        FOR i_prod IN 1..prod_funcs.COUNT LOOP
+            IF prod_funcs(i_prod).OBJECT_NAME = dev_funcs(i_dev).OBJECT_NAME THEN
                 is_found := TRUE;
-                IF have_different_arguments(dev_function.OBJECT_NAME, dev_schema_name, prod_schema_name, NULL) THEN
-                    DBMS_OUTPUT.PUT_LINE('Function ' || dev_function.OBJECT_NAME 
-                        || ' has different arguments.');
-                ELSIF have_different_text(dev_function.OBJECT_NAME, dev_schema_name, prod_schema_name, dev_function.object_type) THEN
-                    DBMS_OUTPUT.PUT_LINE('Function ' || dev_function.OBJECT_NAME 
-                        || ' has different text.');
+                IF have_different_arguments(dev_funcs(i_dev).OBJECT_NAME, dev_schema_name, prod_schema_name, NULL) THEN
+                    INSERT INTO DIFFERENT_OBJECTS (name, type, description)
+                        VALUES (dev_funcs(i_dev).OBJECT_NAME, dev_funcs(i_dev).OBJECT_TYPE, 'ARGUMENTS');
+                ELSIF have_different_text(dev_funcs(i_dev).OBJECT_NAME, dev_schema_name, prod_schema_name, dev_funcs(i_dev).object_type) THEN
+                    INSERT INTO DIFFERENT_OBJECTS (name, type, description)
+                        VALUES (dev_funcs(i_dev).OBJECT_NAME, dev_funcs(i_dev).OBJECT_TYPE, 'TEXT');
                 END IF;
                 EXIT;
             END IF;
         END LOOP; 
-        IF is_found = FALSE THEN          
-            DBMS_OUTPUT.PUT_LINE('Funciton ' || prod_function.object_name);
+        IF is_found = FALSE THEN 
+            INSERT INTO DIFFERENT_OBJECTS (name, type, description)
+                        VALUES (dev_funcs(i_dev).OBJECT_NAME, dev_funcs(i_dev).OBJECT_TYPE, 'NOT EXISTS');
         END IF;
     END LOOP;
 END;
@@ -253,23 +286,59 @@ END;
 
 CREATE OR REPLACE PROCEDURE compare_indexes(dev_schema_name VARCHAR2, 
                                             prod_schema_name VARCHAR2)
+AUTHID CURRENT_USER
 AS
-    CURSOR dev_indexes IS SELECT index_name FROM ALL_INDEXES 
-        WHERE OWNER = dev_schema_name AND index_name NOT LIKE 'SYS%';
-    CURSOR prod_indexes IS SELECT index_name FROM ALL_INDEXES 
-        WHERE OWNER = prod_schema_name AND index_name NOT LIKE 'SYS%';
+    TYPE index_record_t IS RECORD 
+    (
+        index_name ALL_INDEXES.index_name%TYPE,
+        table_name ALL_INDEXES.table_name%TYPE
+    );
+    TYPE indexes_table_t IS TABLE OF index_record_t;
+    dev_indexes indexes_table_t;
+    prod_indexes indexes_table_t;
     is_found BOOLEAN;
+    TYPE string_list_t IS TABLE OF VARCHAR2(300);
+    dev_index_columns string_list_t;
+    prod_index_columns string_list_t;
 BEGIN
-    FOR dev_index IN dev_indexes LOOP
+     SELECT index_name, table_name BULK COLLECT INTO dev_indexes FROM ALL_INDEXES 
+        WHERE OWNER = dev_schema_name AND index_name NOT LIKE 'SYS%';
+    SELECT index_name, table_name BULK COLLECT INTO prod_indexes FROM ALL_INDEXES 
+        WHERE OWNER = prod_schema_name AND index_name NOT LIKE 'SYS%';
+    FOR i_dev IN 1..dev_indexes.COUNT LOOP
         is_found := FALSE;
-        FOR prod_index IN prod_indexes LOOP
-            IF dev_index.index_name = prod_index.index_name THEN
+       FOR i_prod IN 1..prod_indexes.COUNT LOOP
+            IF dev_indexes(i_dev).index_name = prod_indexes(i_prod).index_name THEN
                 is_found := TRUE;
+                IF dev_indexes(i_dev).table_name != prod_indexes(i_prod).table_name THEN
+                    INSERT INTO DIFFERENT_OBJECTS (name, type, description)
+                        VALUES (dev_indexes(i_dev).index_name, 'INDEX', 'TABLES');
+                    EXIT;
+                END IF;
+                SELECT column_name BULK COLLECT INTO dev_index_columns
+                    FROM ALL_IND_COLUMNS WHERE index_owner = dev_schema_name 
+                    AND index_name = dev_indexes(i_dev).index_name ORDER BY column_position;
+                SELECT column_name BULK COLLECT INTO prod_index_columns
+                    FROM ALL_IND_COLUMNS WHERE index_owner = prod_schema_name 
+                    AND index_name = dev_indexes(i_dev).index_name ORDER BY column_position;
+                IF dev_index_columns.COUNT != prod_index_columns.COUNT THEN
+                    INSERT INTO DIFFERENT_OBJECTS (name, type, description)
+                        VALUES (dev_indexes(i_dev).index_name, 'INDEX', 'COLUMNS');
+                    EXIT;
+                END IF;
+                FOR i IN 1..dev_index_columns.COUNT LOOP
+                    IF dev_index_columns(i) != prod_index_columns(i) THEN
+                        INSERT INTO DIFFERENT_OBJECTS (name, type, description)
+                            VALUES (dev_indexes(i_dev).index_name, 'INDEX', 'COLUMNS');
+                        EXIT;
+                    END IF;
+                END LOOP;
                 EXIT;
             END IF;
         END LOOP;
         IF is_found = FALSE THEN
-            DBMS_OUTPUT.PUT_LINE('Index ' || dev_index.index_name);
+            INSERT INTO DIFFERENT_OBJECTS (name, type, description)
+                        VALUES (dev_indexes(i_dev).index_name, 'INDEX', 'NOT EXISTS');
         END IF;
     END LOOP;
 END;
@@ -277,76 +346,39 @@ END;
 
 CREATE OR REPLACE PROCEDURE compare_packages(dev_schema_name VARCHAR2, 
                                             prod_schema_name VARCHAR2)
+AUTHID CURRENT_USER
 AS
-    CURSOR dev_packages IS SELECT object_name 
+    TYPE packages_t IS TABLE OF VARCHAR2(100);
+    dev_packages packages_t;
+    prod_packages packages_t;
+    package_is_found BOOLEAN;   
+BEGIN
+    SELECT object_name BULK COLLECT INTO dev_packages
         FROM ALL_OBJECTS WHERE OBJECT_TYPE = 'PACKAGE'
         AND OWNER = dev_schema_name;
-    CURSOR prod_packages IS SELECT object_name 
+    SELECT object_name BULK COLLECT INTO prod_packages  
         FROM ALL_OBJECTS WHERE OBJECT_TYPE = 'PACKAGE'
         AND OWNER = prod_schema_name;
-    package_is_found BOOLEAN;
-    procedure_is_found BOOLEAN;    
-BEGIN
-    FOR dev_package IN dev_packages LOOP
+    FOR i_dev IN 1..dev_packages.COUNT LOOP
         package_is_found := FALSE;
-        FOR prod_package IN prod_packages LOOP
-            IF dev_package.object_name = prod_package.object_name THEN
+        FOR i_prod IN 1..prod_packages.COUNT LOOP
+            IF dev_packages(i_dev) = prod_packages(i_prod) THEN
                 package_is_found := TRUE;
-                -- compare procedures
-                procedure_is_found := FALSE;
-                FOR dev_proc IN 
-                (
-                    SELECT procedure_name FROM ALL_PROCEDURES  WHERE OWNER = dev_schema_name 
-                    AND object_name = dev_package.object_name 
-                    AND procedure_name IS NOT NULL
-                ) LOOP
-                    FOR prod_proc IN 
-                    (
-                        SELECT procedure_name FROM ALL_PROCEDURES  WHERE OWNER = prod_schema_name 
-                        AND object_name = prod_package.object_name 
-                        AND procedure_name IS NOT NULL
-                    ) LOOP
-                        IF dev_proc.procedure_name = prod_proc.procedure_name THEN
-                            procedure_is_found := TRUE;
-                            -- compare procedures' arguments
-                            IF have_different_arguments(dev_proc.procedure_name, 
-                                                        dev_schema_name, 
-                                                        prod_schema_name,
-                                                        dev_package.object_name)
-                            THEN
-                                DBMS_OUTPUT.PUT_LINE('Different arguments in package '
-                                    || dev_package.object_name || ' in function '
-                                    || dev_proc.procedure_name);
-                            END IF;
-                            EXIT;
-                        END IF;
-                    END LOOP;
-                    IF procedure_is_found = FALSE THEN
-                        DBMS_OUTPUT.PUT_LINE('in package '
-                                    || dev_package.object_name || ' function '
-                                    || dev_proc.procedure_name);
-                    END IF;
-                END LOOP;
-                IF have_different_text(dev_package.object_name, dev_schema_name, prod_schema_name, 'PACKAGE')
-                    OR have_different_text(dev_package.object_name, dev_schema_name, prod_schema_name, 'PACKAGE BODY')
+                IF have_different_text(dev_packages(i_dev), dev_schema_name, prod_schema_name, 'PACKAGE')
+                    OR have_different_text(dev_packages(i_dev), dev_schema_name, prod_schema_name, 'PACKAGE BODY')
                 THEN 
-                    DBMS_OUTPUT.PUT_LINE('Package '
-                                        || dev_package.object_name || 
-                                        ' has different text');
+                    INSERT INTO DIFFERENT_OBJECTS (name, type, description)
+                        VALUES (dev_packages(i_dev), 'PACKAGE', 'TEXT');
                 END IF;
                 EXIT;
             END IF;
         END LOOP;
         IF package_is_found = FALSE THEN
-            DBMS_OUTPUT.PUT_LINE('Package ' || dev_package.object_name);
+            INSERT INTO DIFFERENT_OBJECTS (name, type, description)
+                        VALUES (dev_packages(i_dev), 'PACKAGE', 'NOT EXISTS');
         END IF;
     END LOOP;
 END;
-
-
-
-
-
 
 
 CREATE OR REPLACE FUNCTION have_different_text(object_name VARCHAR2, 
@@ -379,61 +411,90 @@ BEGIN
 END;
 
 
-select * from all_source where NAME = 'EMP_MGMT' AND OWNER = 'DEV'
-    order by TYPE, line;
-    
-
-
-
-
-CREATE OR REPLACE TYPE OBJECT_REC_TYPE AS OBJECT (
-    object_type VARCHAR2(20),
-    object_name VARCHAR(100),
-    CONSTRUCTOR FUNCTION OBJECT_REC_TYPE RETURN SELF AS RESULT
-);
-
-
-CREATE OR REPLACE TYPE BODY OBJECT_REC_TYPE 
-AS 
-    CONSTRUCTOR FUNCTION OBJECT_REC_TYPE RETURN SELF AS RESULT
-    IS
-    BEGIN
-        self.object_type := null;
-        self.object_name := null;
-        RETURN;
-    END;
-END;
-
- 
-CREATE OR REPLACE TYPE OBJECT_TABLE_TYPE AS TABLE OF OBJECT_REC_TYPE; 
-
-SELECT * FROM ALL_INDEXES WHERE OWNER = 'DEV';
-
-
-SELECT * FROM ALL_IND_COLUMNS WHERE INDEX_OWNER = 'DEV';
-
-
-CREATE OR REPLACE FUNCTION update_prod_schema(dev_schema_name VARCHAR2, 
-                                              prod_schema_name VARCHAR2)
-RETURN VARCHAR2
+CREATE OR REPLACE PROCEDURE get_differences(dev_schema_name VARCHAR2, 
+                                            prod_schema_name VARCHAR2,
+                                            search_for_cycles BOOLEAN)
+AUTHID CURRENT_USER
 AS
 BEGIN
-    get_differences(dev_schema_name, prod_schema_name); 
-    get_differences(prod_schema_name, dev_schema_name); 
-    RETURN 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    EXECUTE IMMEDIATE 'TRUNCATE TABLE different_objects';
+    compare_tables(dev_schema_name, prod_schema_name, search_for_cycles);
+    compare_functions(dev_schema_name, prod_schema_name);
+    compare_indexes(dev_schema_name, prod_schema_name);
+    compare_packages(dev_schema_name, prod_schema_name);
 END;
 
 
+CREATE OR REPLACE FUNCTION get_full_ddl_script(dev_schema_name VARCHAR2, 
+                                                prod_schema_name VARCHAR2)
+RETURN CLOB
+AUTHID CURRENT_USER
+AS
+    ddl_script CLOB;
+BEGIN
+    ddl_script := '';
+--    get_differences(dev_schema_name, prod_schema_name, TRUE);
+    DBMS_METADATA.SET_TRANSFORM_PARAM(dbms_metadata.SESSION_TRANSFORM, 'EMIT_SCHEMA', false);
+    FOR rec IN (SELECT * FROM DIFFERENT_OBJECTS) LOOP
+        IF rec.description = 'NOT EXISTS' THEN
+            ddl_script := ddl_script || get_create_ddl_script(rec.type, rec.name, dev_schema_name);
+        ELSE
+            ddl_script := ddl_script || get_drop_ddl_script(rec.type, rec.name, prod_schema_name);
+            ddl_script := ddl_script || get_create_ddl_script(rec.type, rec.name, dev_schema_name);
+        END IF;
+    END LOOP;
+    
+--    get_differences(prod_schema_name, dev_schema_name, FALSE);
+    FOR rec IN (SELECT * FROM DIFFERENT_OBJECTS) LOOP
+        IF rec.description = 'NOT EXISTS' THEN
+            ddl_script := ddl_script || get_drop_ddl_script(rec.type, rec.name, prod_schema_name);
+        END IF;
+    END LOOP;
+    RETURN ddl_script;
+END;
 
 
+CREATE OR REPLACE FUNCTION get_create_ddl_script(object_type VARCHAR2, 
+                                                  object_name VARCHAR2, 
+                                                  schema_name VARCHAR2)
+RETURN CLOB
+AUTHID CURRENT_USER
+AS
+    ddl_script CLOB;
+BEGIN
+    IF object_type = 'TABLE' THEN
+        ddl_script := DBMS_METADATA.GET_DDL('TABLE', object_name, schema_name);
+    ELSIF object_type = 'FUNCTION' THEN
+        ddl_script := DBMS_METADATA.GET_DDL('FUNCTION', object_name, schema_name);    
+    ELSIF object_type = 'PROCEDURE' THEN
+        ddl_script := DBMS_METADATA.GET_DDL('PROCEDURE', object_name, schema_name);
+    ELSIF object_type = 'PACKAGE' THEN
+        ddl_script := DBMS_METADATA.GET_DDL('PACKAGE', object_name, schema_name);
+    ELSIF object_type = 'INDEX' THEN
+        ddl_script := DBMS_METADATA.GET_DDL('INDEX', object_name, schema_name);
+    END IF;
+    RETURN ddl_script;
+END;
 
 
-
--- TEST--
-SET SERVEROUTPUT ON;
-EXEC GET_DIFFERENCES('DEV', 'PROD');
-EXEC GET_DIFFERENCES('PROD', 'DEV');
-
-
-     
-     
+CREATE OR REPLACE FUNCTION get_drop_ddl_script(object_type VARCHAR2, 
+                                                object_name VARCHAR2, 
+                                                schema_name VARCHAR2)
+RETURN CLOB
+AUTHID CURRENT_USER
+AS
+    ddl_script CLOB;
+BEGIN
+    IF object_type = 'TABLE' THEN
+        ddl_script := CHR(13) || 'DROP TABLE ' || schema_name || '.' || object_name || ' CASCADE CONSTRAINTS;';
+    ELSIF object_type = 'FUNCTION' THEN
+        ddl_script := CHR(13) || 'DROP FUNCTION ' || schema_name || '.' || object_name || ';';
+    ELSIF object_type = 'PROCEDURE' THEN
+        ddl_script := CHR(13) || 'DROP PROCEDURE ' || schema_name || '.' || object_name || ';';
+    ELSIF object_type = 'PACKAGE' THEN
+        ddl_script := CHR(13) || 'DROP PACKAGE ' || schema_name || '.' || object_name || ';';
+    ELSIF object_type = 'INDEX' THEN
+        ddl_script := CHR(13) || 'DROP INDEX ' || schema_name || '.' || object_name || ';';
+    END IF;
+    RETURN ddl_script;
+END;
